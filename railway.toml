@@ -2,12 +2,12 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "gunicorn app_hf:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+startCommand = "gunicorn app_hf:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --worker-class sync --max-requests 1000"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 
-[service]
-memoryLimit = 512      # Now possible! ✅
-sleepAfter = 3600      # Sleep after 1 hour
+[nixpacks]
+# Ensure system dependencies for audio processing
+nixpkgs = ["python39", "gcc", "libsndfile"]
