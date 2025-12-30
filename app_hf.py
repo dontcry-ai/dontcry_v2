@@ -29,7 +29,7 @@ app.config['ALLOWED_EXTENSIONS'] = {'wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm'}
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Hugging Face Configuration
+# Hugging Face Configuration - FIXED: Use correct model name
 HF_API_URL = "https://api-inference.huggingface.co/models/dontcryai/dontcry"
 HF_TOKEN = os.getenv("HUGGING_FACE_TOKEN")
 
@@ -68,8 +68,12 @@ def convert_to_wav_bytes(file_path):
 def preprocess_audio(audio_path):
     """Load and preprocess audio to 16kHz WAV"""
     try:
-        # Load audio
-        audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+        # Load audio with error handling
+        audio, sr = librosa.load(audio_path, sr=16000, mono=True, duration=10)
+        
+        # Check if audio is valid
+        if len(audio) == 0:
+            raise Exception("Audio file is empty or corrupted")
         
         # Normalize
         if audio.max() > 0:
@@ -78,12 +82,17 @@ def preprocess_audio(audio_path):
         # Trim silence
         audio, _ = librosa.effects.trim(audio, top_db=20)
         
+        # Check minimum length (at least 0.5 seconds)
+        if len(audio) < 8000:  # 0.5 seconds at 16kHz
+            raise Exception("Audio too short (minimum 0.5 seconds required)")
+        
         # Ensure 5 seconds duration
         target_length = 16000 * 5
         if len(audio) > target_length:
             audio = audio[:target_length]
         elif len(audio) < target_length:
-            audio = librosa.util.pad_center(audio, size=target_length)
+            import numpy as np
+            audio = np.pad(audio, (0, target_length - len(audio)), mode='constant')
         
         # Convert to bytes
         import soundfile as sf
@@ -93,11 +102,14 @@ def preprocess_audio(audio_path):
         
         return wav_io.read()
     except Exception as e:
-        raise Exception(f"Audio preprocessing failed: {e}")
+        raise Exception(f"Audio preprocessing failed: {str(e)}")
 
 
 def call_huggingface_api(audio_bytes, max_retries=3):
     """Call Hugging Face Inference API"""
+    if not HF_TOKEN:
+        return {"error": "Hugging Face token not configured"}
+    
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
     for attempt in range(max_retries):
@@ -106,7 +118,7 @@ def call_huggingface_api(audio_bytes, max_retries=3):
                 HF_API_URL,
                 headers=headers,
                 data=audio_bytes,
-                timeout=30
+                timeout=60  # Increased timeout for model loading
             )
             
             if response.status_code == 200:
@@ -117,21 +129,31 @@ def call_huggingface_api(audio_bytes, max_retries=3):
                 if attempt < max_retries - 1:
                     print(f"Model loading, retry {attempt + 1}/{max_retries}...")
                     import time
-                    time.sleep(5)  # Wait 5 seconds
+                    time.sleep(10)  # Wait 10 seconds for model to load
                     continue
                 else:
-                    return {"error": "Model is loading, please try again in a moment"}
+                    return {"error": "Model is still loading. Please try again in 20 seconds."}
+            
+            elif response.status_code == 401:
+                return {"error": "Invalid Hugging Face token"}
+            
+            elif response.status_code == 400:
+                return {"error": f"Bad request: {response.text}"}
             
             else:
-                return {"error": f"API error: {response.status_code} - {response.text}"}
+                return {"error": f"API error {response.status_code}: {response.text}"}
         
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
+                print(f"Timeout, retry {attempt + 1}/{max_retries}...")
                 continue
-            return {"error": "Request timeout"}
+            return {"error": "Request timeout. Model may be loading, please try again."}
+        
+        except requests.exceptions.ConnectionError:
+            return {"error": "Cannot connect to Hugging Face API"}
         
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Unexpected error: {str(e)}"}
     
     return {"error": "Max retries reached"}
 
@@ -141,6 +163,9 @@ def format_prediction_result(hf_response, confidence_threshold=0.6):
     try:
         if isinstance(hf_response, dict) and "error" in hf_response:
             return None, hf_response["error"]
+        
+        if not isinstance(hf_response, list) or len(hf_response) == 0:
+            return None, "Invalid response from model"
         
         # HF returns: [{'label': 'LABEL_0', 'score': 0.85}, ...]
         # Convert to your format
@@ -166,7 +191,7 @@ def format_prediction_result(hf_response, confidence_threshold=0.6):
         return result, None
     
     except Exception as e:
-        return None, f"Error formatting result: {e}"
+        return None, f"Error formatting result: {str(e)}"
 
 
 # ============================================================================
@@ -180,7 +205,7 @@ def home():
         "message": "DontCryAI Backend API (Hugging Face)",
         "status": "running",
         "version": "3.0-HF",
-        "model": "dontcryai/baby-cry-classifier",
+        "model": "dontcryai/dontcry",  # FIXED: Correct model name
         "endpoints": {
             "health": "/api/health",
             "predict_upload": "/api/predict/upload",
@@ -199,7 +224,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'hugging_face': hf_status,
-        'model': 'dontcryai/baby-cry-classifier',
+        'model': 'dontcryai/dontcry',  # FIXED: Correct model name
         'classes': list(CRY_CATEGORIES.values()),
         'timestamp': datetime.now().isoformat()
     })
@@ -226,7 +251,7 @@ def predict_upload():
         if file.filename == '' or not allowed_file(file.filename):
             return jsonify({
                 'success': False,
-                'error': 'Invalid file format'
+                'error': 'Invalid file format. Supported: wav, mp3, m4a, flac, ogg, webm'
             }), 400
         
         confidence_threshold = float(request.form.get('confidence_threshold', 0.6))
@@ -266,7 +291,10 @@ def predict_upload():
         finally:
             # Cleanup
             if os.path.exists(temp_path):
-                os.remove(temp_path)
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass  # Ignore cleanup errors
     
     except Exception as e:
         print(f"Error in predict_upload: {e}")
@@ -320,13 +348,18 @@ def predict_record():
                 
                 # Preprocess
                 processed_audio = preprocess_audio(temp_path)
-                os.remove(temp_path)
+                
+                # Cleanup immediately
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
                 
             except Exception as e:
                 print(f"Audio decode error: {e}")
                 return jsonify({
                     'success': False,
-                    'error': 'Failed to decode audio data'
+                    'error': f'Failed to process audio: {str(e)}'
                 }), 400
         else:
             return jsonify({
@@ -409,7 +442,7 @@ def internal_error(error):
 print("=" * 70)
 print("DONTCRYAI BACKEND - HUGGING FACE API MODE")
 print("=" * 70)
-print(f"✓ Model: dontcryai/baby-cry-classifier")
+print(f"✓ Model: dontcryai/dontcry")  # FIXED
 print(f"✓ HF Token: {'Configured' if HF_TOKEN else 'Missing'}")
 print(f"✓ Categories: {list(CRY_CATEGORIES.values())}")
 print(f"✓ Memory: ~150MB (vs 1.5GB local)")
@@ -420,4 +453,3 @@ if __name__ == '__main__':
     print(f"\n🚀 Starting server on http://0.0.0.0:{port}\n")
 
     app.run(host='0.0.0.0', port=port, debug=False)
-
