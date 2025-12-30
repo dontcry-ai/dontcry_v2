@@ -30,7 +30,7 @@ app.config['ALLOWED_EXTENSIONS'] = {'wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm'}
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Hugging Face Configuration
-HF_API_URL = "https://router.huggingface.co/models/dontcryai/dontcry"
+HF_API_URL = "https://api-inference.huggingface.co/models/dontcryai/dontcry"
 HF_TOKEN = os.getenv("HUGGING_FACE_TOKEN")
 
 # Cry categories mapping
@@ -420,3 +420,4 @@ if __name__ == '__main__':
     print(f"\n🚀 Starting server on http://0.0.0.0:{port}\n")
 
     app.run(host='0.0.0.0', port=port, debug=False)
+
